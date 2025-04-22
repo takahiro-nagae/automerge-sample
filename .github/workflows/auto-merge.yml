@@ -5,25 +5,36 @@ on:
     types: [labeled, synchronize]
 
 permissions:
-  pull-requests: write
   contents: write
+  pull-requests: read
 
 jobs:
-  auto-merge:
+  merge-branch-content:
     runs-on: ubuntu-latest
     if: contains(github.event.pull_request.labels.*.name, 'preview-target')
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout target branch
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Find and merge all preview PRs
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Find preview PRs
+        id: find-prs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&labels=preview")
+            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&labels=hiyoko/preview")
 
-          PR_COUNT=$(echo "$RESPONSE" | jq '. | length')
+          # 検索結果からPR数を取得
+          PR_COUNT=$(echo $RESPONSE | jq '. | length')
 
           if [ "$PR_COUNT" -eq "0" ]; then
             echo "No PRs with preview label found"
@@ -32,22 +43,29 @@ jobs:
 
           echo "Found $PR_COUNT PRs with preview label"
 
-          for i in $(seq 0 $(("$PR_COUNT" - 1))); do
-            PR_NUMBER=$(echo "$RESPONSE" | jq -r ".[$i].number")
-            PR_TITLE=$(echo "$RESPONSE" | jq -r ".[$i].title")
-
-            echo "Processing PR #$PR_NUMBER: $PR_TITLE"
-
-            MERGE_RESULT=$(curl -s -X PUT \
-              -H "Authorization: token $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/merge" \
-              -d '{"merge_method":"merge"}')
-
-            if echo "$MERGE_RESULT" | jq -e '.merged == true' > /dev/null; then
-              echo "✅ Successfully merged PR #$PR_NUMBER"
+          # すべてのプレビューPRのブランチ情報を抽出
+          for i in $(seq 0 $(($PR_COUNT - 1))); do
+            PR_NUMBER=$(echo $RESPONSE | jq -r ".[$i].number")
+            PR_BRANCH=$(echo $RESPONSE | jq -r ".[$i].head.ref")
+            PR_REPO=$(echo $RESPONSE | jq -r ".[$i].head.repo.clone_url")
+            
+            echo "PR #$PR_NUMBER uses branch: $PR_BRANCH from $PR_REPO"
+            
+            # リモートを追加してフェッチ
+            REMOTE_NAME="preview-${PR_NUMBER}"
+            git remote add $REMOTE_NAME $PR_REPO
+            git fetch $REMOTE_NAME $PR_BRANCH
+            
+            # ブランチの内容をマージ (マージコミットを作成)
+            echo "Merging content from PR #$PR_NUMBER (branch $PR_BRANCH)"
+            if git merge --no-ff $REMOTE_NAME/$PR_BRANCH -m "Merge preview content from PR #$PR_NUMBER (branch $PR_BRANCH)"; then
+              echo "✅ Successfully merged content from PR #$PR_NUMBER"
             else
-              ERROR_MSG=$(echo "$MERGE_RESULT" | jq -r '.message')
-              echo "❌ Failed to merge PR #$PR_NUMBER: $ERROR_MSG"
+              echo "❌ Failed to merge content from PR #$PR_NUMBER due to conflicts"
+              # マージ競合をリセット
+              git merge --abort
             fi
           done
+
+          # 変更をプッシュ
+          git push origin ${{ github.event.pull_request.base.ref }}
