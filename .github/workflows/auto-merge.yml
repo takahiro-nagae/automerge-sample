@@ -1,4 +1,4 @@
-name: Update Preview Branches
+name: Merge Content to Preview Branches
 
 on:
   pull_request:
@@ -9,50 +9,23 @@ permissions:
   pull-requests: write
 
 jobs:
-  update-preview:
+  merge-to-preview:
     runs-on: ubuntu-latest
     if: contains(github.event.pull_request.labels.*.name, 'preview-target')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      - name: Get target branch content
-        env:
-          TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
-          TARGET_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Find preview PRs and merge content
         run: |
           echo "Target branch: $TARGET_BRANCH (SHA: $TARGET_SHA)"
 
-          # target-previewブランチの内容を取得
-          git fetch origin $TARGET_BRANCH
-
-          # 変更内容を一時ディレクトリに保存
-          mkdir -p /tmp/target-changes
-          git archive origin/$TARGET_BRANCH | tar -x -C /tmp/target-changes
-
-          echo "Target branch content saved to /tmp/target-changes"
-
-      - name: Find preview PRs and apply changes
-        id: update-previews
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
-          TARGET_SHA: ${{ github.event.pull_request.head.sha }}
-          CURRENT_PR: ${{ github.event.pull_request.number }}
-        run: |
-          # 失敗したプレビューブランチを記録する変数
-          FAILED_BRANCHES=""
-
           # GitHub REST APIを使用して「preview」ラベルがついたすべてのPRを検索
-          # state=openを明示的に指定し、ラベルフィルタを厳密に適用
           RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&labels=preview")
 
@@ -71,73 +44,34 @@ jobs:
             PR_NUMBER=$(echo $RESPONSE | jq -r ".[$i].number")
             PREVIEW_BRANCH=$(echo $RESPONSE | jq -r ".[$i].head.ref")
             
-            # 念のため、PRのラベルを直接確認
-            LABELS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/labels")
-            
-            # previewラベルが本当についているか確認
-            if ! echo $LABELS | jq -e '.[] | select(.name == "preview")' > /dev/null; then
-              echo "PR #$PR_NUMBER does not have preview label. Skipping."
-              continue
-            fi
-            
             echo "Processing preview PR #$PR_NUMBER (branch: $PREVIEW_BRANCH)"
             
             # プレビューブランチをチェックアウト
             git fetch origin $PREVIEW_BRANCH
-            git checkout -B $PREVIEW_BRANCH origin/$PREVIEW_BRANCH
+            git checkout $PREVIEW_BRANCH
             
-            # 変更を適用（コピーして追加）
+            # preview-targetブランチの内容をマージ（直接コミットとして適用）
             echo "Applying changes from $TARGET_BRANCH to $PREVIEW_BRANCH"
-            
-            # エラーハンドリングを追加
-            if cp -r /tmp/target-changes/* ./; then
-              # 変更があるか確認
-              if git diff --quiet; then
-                echo "No changes to apply for $PREVIEW_BRANCH"
-                continue
-              fi
+            if git merge --no-ff origin/$TARGET_BRANCH -m "Apply preview-target changes from $TARGET_BRANCH"; then
+              # 変更をプッシュ
+              git push origin $PREVIEW_BRANCH
+              echo "✅ Successfully applied changes to preview branch $PREVIEW_BRANCH"
               
-              # 変更をコミット
-              if git add . && git commit -m "Apply changes from $TARGET_BRANCH (SHA: $TARGET_SHA)"; then
-                # 変更をプッシュ
-                if git push origin $PREVIEW_BRANCH; then
-                  echo "✅ Successfully applied changes to preview branch $PREVIEW_BRANCH"
-                else
-                  echo "❌ Failed to push changes to $PREVIEW_BRANCH"
-                  FAILED_BRANCHES="$FAILED_BRANCHES\n- $PREVIEW_BRANCH (PR #$PR_NUMBER): Failed to push changes"
-                fi
-              else
-                echo "❌ Failed to commit changes to $PREVIEW_BRANCH"
-                FAILED_BRANCHES="$FAILED_BRANCHES\n- $PREVIEW_BRANCH (PR #$PR_NUMBER): Failed to commit changes"
-              fi
+              # PRにコメントを追加
+              curl -s -X POST \
+                -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+                -d "{\"body\":\"✅ Preview updated with changes from branch \`$TARGET_BRANCH\` (SHA: $TARGET_SHA)\"}"
             else
-              echo "❌ Failed to copy changes to $PREVIEW_BRANCH"
-              FAILED_BRANCHES="$FAILED_BRANCHES\n- $PREVIEW_BRANCH (PR #$PR_NUMBER): Failed to copy changes"
+              echo "❌ Failed to apply changes due to conflicts"
+              git merge --abort
+              
+              # PRにコメントを追加
+              curl -s -X POST \
+                -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+                -d "{\"body\":\"❌ Failed to update preview with changes from \`$TARGET_BRANCH\` due to merge conflicts. Manual intervention required.\"}"
             fi
           done
-
-          # 失敗したブランチがあれば、現在のPRにコメント
-          if [ ! -z "$FAILED_BRANCHES" ]; then
-            echo "FAILED_BRANCHES<<EOF" >> $GITHUB_OUTPUT
-            echo -e "$FAILED_BRANCHES" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-            echo "has_failures=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_failures=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Comment on PR if updates failed
-        if: steps.update-previews.outputs.has_failures == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          FAILED_BRANCHES: ${{ steps.update-previews.outputs.FAILED_BRANCHES }}
-        run: |
-          COMMENT="❌ **Failed to update some preview branches with your changes**\n\nThe following branches could not be updated:${{ steps.update-previews.outputs.FAILED_BRANCHES }}\n\nPlease check for conflicts or other issues."
-
-          curl -s -X POST \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
-            -d "{\"body\":\"$COMMENT\"}"
