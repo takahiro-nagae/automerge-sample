@@ -18,8 +18,8 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          git config user.name "takahiro-nagae"
+          git config user.email "tnagae627@gmail.com"
 
       - name: Find preview PRs and merge content
         run: |
@@ -27,7 +27,7 @@ jobs:
 
           # GitHub REST APIを使用して「preview」ラベルがついたすべてのPRを検索
           RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&labels=preview")
+            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open")
 
           # 検索結果からPR数を取得
           PR_COUNT=$(echo $RESPONSE | jq '. | length')
@@ -37,12 +37,18 @@ jobs:
             exit 0
           fi
 
-          echo "Found $PR_COUNT PRs with preview label"
-
           # すべてのプレビューPRに対して処理
           for i in $(seq 0 $(($PR_COUNT - 1))); do
             PR_NUMBER=$(echo $RESPONSE | jq -r ".[$i].number")
             PREVIEW_BRANCH=$(echo $RESPONSE | jq -r ".[$i].head.ref")
+
+            LABELS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/labels")
+            
+            if ! echo $LABELS | jq -e '.[] | select(.name == "hiyoko/preview")' > /dev/null; then
+              echo "PR #$PR_NUMBER does not have hiyoko/preview label. Skipping."
+              continue
+            fi
             
             echo "Processing preview PR #$PR_NUMBER (branch: $PREVIEW_BRANCH)"
             
