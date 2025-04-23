@@ -19,6 +19,8 @@ jobs:
       - name: Find and merge all preview PRs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/pulls?state=open")
@@ -37,7 +39,6 @@ jobs:
               "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/labels")
             
             if ! echo $LABELS | jq -e '.[] | select(.name == "preview")' > /dev/null; then
-              echo "PR #$PR_NUMBER does not have preview label. Skipping."
               continue
             fi
             
@@ -49,7 +50,7 @@ jobs:
             
             # preview-targetブランチの内容をマージ（直接コミットとして適用）
             echo "Applying changes from $TARGET_BRANCH to $PREVIEW_BRANCH"
-            if git merge --no-ff origin/$TARGET_BRANCH -m "Apply preview-target changes from $TARGET_BRANCH"; then
+            if git merge --no-ff origin/$TARGET_BRANCH -m "Apply changes from $TARGET_BRANCH (SHA: $TARGET_SHA)"; then
               # 変更をプッシュ
               git push origin $PREVIEW_BRANCH
               echo "✅ Successfully applied changes to preview branch $PREVIEW_BRANCH"
