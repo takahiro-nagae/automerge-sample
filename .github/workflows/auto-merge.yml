@@ -45,6 +45,7 @@ jobs:
             echo "Processing preview PR #$PR_NUMBER (branch: $PREVIEW_BRANCH)"
             
             # プレビューブランチをチェックアウト
+            git fetch origin $TARGET_BRANCH
             git fetch origin $PREVIEW_BRANCH
             git checkout $PREVIEW_BRANCH
             
