@@ -21,31 +21,39 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&labels=preview")
+            "https://api.github.com/repos/${{ github.repository }}/pulls?state=open")
 
           PR_COUNT=$(echo "$RESPONSE" | jq '. | length')
 
           if [ "$PR_COUNT" -eq "0" ]; then
-            echo "No PRs with preview label found"
             exit 0
           fi
 
-          echo "Found $PR_COUNT PRs with preview label"
+          for i in $(seq 0 $(($PR_COUNT - 1))); do
+            PR_NUMBER=$(echo $RESPONSE | jq -r ".[$i].number")
+            PREVIEW_BRANCH=$(echo $RESPONSE | jq -r ".[$i].head.ref")
 
-          for i in $(seq 0 $(("$PR_COUNT" - 1))); do
-            PR_NUMBER=$(echo "$RESPONSE" | jq -r ".[$i].number")
-            PR_TITLE=$(echo "$RESPONSE" | jq -r ".[$i].title")
-
-            echo "Processing PR #$PR_NUMBER: $PR_TITLE"
-
-            MERGE_RESULT=$(curl -s -X PUT \
-              -H "Authorization: token $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/merge" \
-              -d '{"merge_method":"merge"}')
-
-            if echo "$MERGE_RESULT" | jq -e '.merged == true' > /dev/null; then
-              echo "✅ Successfully merged PR #$PR_NUMBER"
+            LABELS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/labels")
+            
+            if ! echo $LABELS | jq -e '.[] | select(.name == "preview")' > /dev/null; then
+              echo "PR #$PR_NUMBER does not have preview label. Skipping."
+              continue
+            fi
+            
+            echo "Processing preview PR #$PR_NUMBER (branch: $PREVIEW_BRANCH)"
+            
+            # プレビューブランチをチェックアウト
+            git fetch origin $PREVIEW_BRANCH
+            git checkout $PREVIEW_BRANCH
+            
+            # preview-targetブランチの内容をマージ（直接コミットとして適用）
+            echo "Applying changes from $TARGET_BRANCH to $PREVIEW_BRANCH"
+            if git merge --no-ff origin/$TARGET_BRANCH -m "Apply preview-target changes from $TARGET_BRANCH"; then
+              # 変更をプッシュ
+              git push origin $PREVIEW_BRANCH
+              echo "✅ Successfully applied changes to preview branch $PREVIEW_BRANCH"
+              
             else
               ERROR_MSG=$(echo "$MERGE_RESULT" | jq -r '.message')
               echo "❌ Failed to merge PR #$PR_NUMBER: $ERROR_MSG"
